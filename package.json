@@ -6,7 +6,9 @@
     "dev": "bun run --watch src/index.ts"
   },
   "dependencies": {
-    "elysia": "latest"
+    "@elysia/cron": "^1.4.2",
+    "elysia": "latest",
+    "ghostfetch": "^0.1.2"
   },
   "devDependencies": {
     "bun-types": "latest"
