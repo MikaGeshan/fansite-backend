@@ -3,18 +3,11 @@ node_modules
 npm-debug.log
 .npm
 
-# TypeScript source files (we only need compiled JS in production)
-src
-*.ts
-!*.d.ts
-
 # Project Files
 .git
 .gitignore
 .dockerignore
-Dockerfile
 fly.toml # Fly.io configuration file
-tsconfig.json
 tslint.json
 .eslintrc*
 

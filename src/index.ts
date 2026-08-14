@@ -180,7 +180,13 @@ async function getSchedule(month: string, year: string) {
 }
 
 // 2. Initialize Elysia App
-const app = new Elysia()
+const port = Number(process.env.PORT ?? 3000);
+
+const app = new Elysia({
+  serve: {
+    hostname: "0.0.0.0",
+  },
+})
   // Background Worker: Scrape the current month automatically every 15 minutes
   .use(
     cron({
@@ -221,7 +227,7 @@ const app = new Elysia()
       return { error: "Failed to fetch schedules" };
     }
   })
-  .listen(process.env.PORT ?? 3000);
+  .listen(port);
 
 console.log(
   `🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`,
