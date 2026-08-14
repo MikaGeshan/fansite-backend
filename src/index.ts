@@ -3,7 +3,7 @@ import { GhostClient } from "ghostfetch";
 
 const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
-const DETAIL_CONCURRENCY = 5; // You can safely raise this back to 5 on a dedicated backend!
+const DETAIL_CONCURRENCY = 1;
 const REQUEST_TIMEOUT_MS = 55_000;
 const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
 
@@ -82,6 +82,7 @@ async function fetchOfficialSchedule(
   month: string,
   year: string,
 ): Promise<ScheduleResult> {
+  console.log(`[fetchOfficialSchedule] Starting ${month}/${year}`);
   const client = new GhostClient({
     browser: "Chrome_131",
     timeout: 15_000,
@@ -96,11 +97,18 @@ async function fetchOfficialSchedule(
     const schedules = Array.isArray(schedulesResponse.data)
       ? schedulesResponse.data
       : [];
+    console.log(
+      `[fetchOfficialSchedule] Loaded ${schedules.length} list items for ${month}/${year}`,
+    );
+
     const listMatches = schedules.filter(
       (show) => Array.isArray(show.jkt48_member) && isTargetMemberShow(show),
     );
 
     if (listMatches.length > 0) {
+      console.log(
+        `[fetchOfficialSchedule] Found ${listMatches.length} matches in list payload`,
+      );
       return {
         source: "elysia-ghostfetch",
         month,
@@ -115,17 +123,26 @@ async function fetchOfficialSchedule(
       .map((show) => show.reference_code)
       .filter((code): code is string => typeof code === "string");
 
+    console.log(
+      `[fetchOfficialSchedule] Fetching ${codes.length} detail records with concurrency=${DETAIL_CONCURRENCY}`,
+    );
     const showsResponses = await mapWithConcurrency(
       codes,
       DETAIL_CONCURRENCY,
       async (code) => {
         try {
+          console.log(`[fetchOfficialSchedule] Fetching detail ${code}`);
           const showDetail = await fetchJson<{ data?: ShowData }>(
             client,
             `/theater-shows/${code}?lang=id`,
           );
+          console.log(`[fetchOfficialSchedule] Loaded detail ${code}`);
           return showDetail.data ?? null;
-        } catch {
+        } catch (error) {
+          console.error(
+            `[fetchOfficialSchedule] Detail ${code} failed:`,
+            error,
+          );
           return null;
         }
       },
@@ -136,6 +153,9 @@ async function fetchOfficialSchedule(
       return isTargetMemberShow(show);
     });
 
+    console.log(
+      `[fetchOfficialSchedule] Found ${filteredShows.length} matches in detail payloads`,
+    );
     return {
       source: "elysia-ghostfetch",
       month,
