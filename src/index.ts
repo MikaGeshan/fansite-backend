@@ -6,6 +6,7 @@ const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
 const CACHE_TTL_MS = 15 * 60 * 1000; // Cache lives for 15 minutes
 const DETAIL_CONCURRENCY = 5; // You can safely raise this back to 5 on a dedicated backend!
+const REQUEST_TIMEOUT_MS = 25_000;
 
 interface Member {
   name: string;
@@ -53,7 +54,13 @@ async function fetchJson<T>(client: GhostClient, path: string): Promise<T> {
   const response = await client.fetch(url);
 
   if (response.status !== 200) {
-    throw new Error(`API error ${path}: ${response.status}`);
+    const contentType = response.headers.get("content-type") ?? "unknown";
+    const cloudflareMitigation =
+      response.headers.get("cf-mitigated") ?? "none";
+
+    throw new Error(
+      `JKT48 API error ${path}: ${response.status}; content-type=${contentType}; cf-mitigated=${cloudflareMitigation}`,
+    );
   }
   return response.json() as Promise<T>;
 }
@@ -179,6 +186,21 @@ async function getSchedule(month: string, year: string) {
   }
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`Schedule request timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 // 2. Initialize Elysia App
 const port = Number(process.env.PORT ?? 3000);
 
@@ -187,6 +209,7 @@ const app = new Elysia({
     hostname: "0.0.0.0",
   },
 })
+  .get("/healthz", () => ({ ok: true }))
   // Background Worker: Scrape the current month automatically every 15 minutes
   .use(
     cron({
@@ -214,16 +237,27 @@ const app = new Elysia({
       const month = query.month ?? String(now.getMonth() + 1);
       const year = query.year ?? String(now.getFullYear());
 
-      const { result, cacheStatus } = await getSchedule(month, year);
+      console.log(`[api/schedule] Fetching schedule for ${month}/${year}`);
+      const { result, cacheStatus } = await withTimeout(
+        getSchedule(month, year),
+        REQUEST_TIMEOUT_MS,
+      );
 
       set.headers = {
         "Cache-Control": "public, s-maxage=300",
         "X-Schedule-Cache": cacheStatus,
       };
 
+      console.log(
+        `[api/schedule] Returning ${result.count} shows for ${month}/${year}; cache=${cacheStatus}`,
+      );
       return result.shows;
     } catch (error) {
-      set.status = 502;
+      console.error("[api/schedule] Failed to fetch schedules:", error);
+      set.status =
+        error instanceof Error && error.message.includes("timed out")
+          ? 504
+          : 502;
       return { error: "Failed to fetch schedules" };
     }
   })
