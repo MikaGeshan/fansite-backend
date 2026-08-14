@@ -7,6 +7,7 @@ const MEMBER_ID = 39;
 const CACHE_TTL_MS = 15 * 60 * 1000; // Cache lives for 15 minutes
 const DETAIL_CONCURRENCY = 5; // You can safely raise this back to 5 on a dedicated backend!
 const REQUEST_TIMEOUT_MS = 25_000;
+const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
 
 interface Member {
   name: string;
@@ -201,6 +202,74 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   }
 }
 
+async function checkNativeUpstream(url: string) {
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeoutId = setTimeout(
+    () => controller.abort(),
+    UPSTREAM_DIAGNOSTIC_TIMEOUT_MS,
+  );
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: "application/json,text/plain,*/*",
+        "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      },
+    });
+
+    return {
+      ok: true,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      cloudflareMitigation: response.headers.get("cf-mitigated"),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function checkGhostfetchUpstream(url: string) {
+  const startedAt = Date.now();
+  const client = new GhostClient({
+    browser: "Chrome_131",
+    timeout: UPSTREAM_DIAGNOSTIC_TIMEOUT_MS,
+  });
+
+  try {
+    const response = await withTimeout(
+      client.fetch(url, { timeout: UPSTREAM_DIAGNOSTIC_TIMEOUT_MS }),
+      UPSTREAM_DIAGNOSTIC_TIMEOUT_MS + 2_000,
+    );
+
+    return {
+      ok: true,
+      status: response.status,
+      contentType: response.headers.get("content-type"),
+      cloudflareMitigation: response.headers.get("cf-mitigated"),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } finally {
+    await client.destroy().catch(() => {});
+  }
+}
+
 // 2. Initialize Elysia App
 const port = Number(process.env.PORT ?? 3000);
 
@@ -210,6 +279,23 @@ const app = new Elysia({
   },
 })
   .get("/healthz", () => ({ ok: true }))
+  .get("/debug/upstream", async ({ query }) => {
+    const now = new Date();
+    const month = query.month ?? String(now.getMonth() + 1);
+    const year = query.year ?? String(now.getFullYear());
+    const url = `${BASE_URL}/schedules?lang=id&month=${month}&year=${year}&type=show`;
+
+    const [nativeFetch, ghostfetch] = await Promise.all([
+      checkNativeUpstream(url),
+      checkGhostfetchUpstream(url),
+    ]);
+
+    return {
+      url,
+      nativeFetch,
+      ghostfetch,
+    };
+  })
   // Background Worker: Scrape the current month automatically every 15 minutes
   .use(
     cron({
