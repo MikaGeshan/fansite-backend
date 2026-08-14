@@ -1,12 +1,10 @@
 import { Elysia } from "elysia";
-import { cron, Patterns } from "@elysia/cron";
 import { GhostClient } from "ghostfetch";
 
 const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
-const CACHE_TTL_MS = 15 * 60 * 1000; // Cache lives for 15 minutes
 const DETAIL_CONCURRENCY = 5; // You can safely raise this back to 5 on a dedicated backend!
-const REQUEST_TIMEOUT_MS = 25_000;
+const REQUEST_TIMEOUT_MS = 55_000;
 const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
 
 interface Member {
@@ -36,15 +34,6 @@ interface ScheduleResult {
   count: number;
   shows: ShowData[];
 }
-
-interface CacheEntry {
-  expiresAt: number;
-  result: ScheduleResult;
-}
-
-// 1. These maps will now safely persist in RAM forever because Elysia is a long-running process
-const scheduleCache = new Map<string, CacheEntry>();
-const pendingRequests = new Map<string, Promise<ScheduleResult>>();
 
 function isTargetMemberShow(show: Pick<ShowData, "jkt48_member">) {
   return show.jkt48_member.some((member) => member.member_id === MEMBER_ID);
@@ -160,33 +149,6 @@ async function fetchOfficialSchedule(
   }
 }
 
-// Request deduplicator
-async function getSchedule(month: string, year: string) {
-  const key = `${year}-${month}`;
-  const cached = scheduleCache.get(key);
-  const now = Date.now();
-
-  if (cached && cached.expiresAt > now) {
-    return { result: cached.result, cacheStatus: "HIT" };
-  }
-
-  const pending = pendingRequests.get(key);
-  if (pending) {
-    return { result: await pending, cacheStatus: "PENDING" };
-  }
-
-  const requestPromise = fetchOfficialSchedule(month, year);
-  pendingRequests.set(key, requestPromise);
-
-  try {
-    const result = await requestPromise;
-    scheduleCache.set(key, { result, expiresAt: Date.now() + CACHE_TTL_MS });
-    return { result, cacheStatus: "MISS" };
-  } finally {
-    pendingRequests.delete(key);
-  }
-}
-
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -296,26 +258,6 @@ const app = new Elysia({
       ghostfetch,
     };
   })
-  // Background Worker: Scrape the current month automatically every 15 minutes
-  .use(
-    cron({
-      name: "background-scraper",
-      pattern: Patterns.everyMinutes(15),
-      async run() {
-        const now = new Date();
-        const month = String(now.getMonth() + 1);
-        const year = String(now.getFullYear());
-
-        console.log(`[cron] Background scrape triggered for ${month}/${year}`);
-        try {
-          await getSchedule(month, year);
-          console.log(`[cron] Cache warmed successfully.`);
-        } catch (error) {
-          console.error(`[cron] Scrape failed:`, error);
-        }
-      },
-    }),
-  )
   // Public API Endpoint
   .get("/api/schedule", async ({ query, set }) => {
     try {
@@ -324,18 +266,18 @@ const app = new Elysia({
       const year = query.year ?? String(now.getFullYear());
 
       console.log(`[api/schedule] Fetching schedule for ${month}/${year}`);
-      const { result, cacheStatus } = await withTimeout(
-        getSchedule(month, year),
+      const result = await withTimeout(
+        fetchOfficialSchedule(month, year),
         REQUEST_TIMEOUT_MS,
       );
 
       set.headers = {
-        "Cache-Control": "public, s-maxage=300",
-        "X-Schedule-Cache": cacheStatus,
+        "Cache-Control": "no-store",
+        "X-Schedule-Cache": "BYPASS",
       };
 
       console.log(
-        `[api/schedule] Returning ${result.count} shows for ${month}/${year}; cache=${cacheStatus}`,
+        `[api/schedule] Returning ${result.count} shows for ${month}/${year}; cache=BYPASS`,
       );
       return result.shows;
     } catch (error) {
