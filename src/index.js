@@ -5,7 +5,19 @@ const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
 const DETAIL_CONCURRENCY = 1;
 const REQUEST_TIMEOUT_MS = 120_000;
-const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
+const GHOSTFETCH_TIMEOUT_MS = Number(process.env.GHOSTFETCH_TIMEOUT_MS ?? 60_000);
+const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = Number(
+  process.env.UPSTREAM_DIAGNOSTIC_TIMEOUT_MS ?? 60_000,
+);
+const GHOSTFETCH_PROXY = process.env.GHOSTFETCH_PROXY;
+
+function ghostClientOptions(timeout = GHOSTFETCH_TIMEOUT_MS) {
+  return {
+    browser: "Chrome_131",
+    timeout,
+    ...(GHOSTFETCH_PROXY ? { proxy: GHOSTFETCH_PROXY } : {}),
+  };
+}
 
 process.on("unhandledRejection", (error) => {
   console.error("[process] Unhandled rejection:", error);
@@ -37,10 +49,7 @@ async function fetchJson(client, path) {
 }
 
 async function fetchJsonWithFreshClient(path) {
-  const client = new GhostClient({
-    browser: "Chrome_131",
-    timeout: 15_000,
-  });
+  const client = new GhostClient(ghostClientOptions());
 
   try {
     return await fetchJson(client, path);
@@ -69,10 +78,7 @@ async function mapWithConcurrency(items, limit, mapper) {
 
 async function fetchOfficialSchedule(month, year) {
   console.log(`[fetchOfficialSchedule] Starting ${month}/${year}`);
-  const client = new GhostClient({
-    browser: "Chrome_131",
-    timeout: 15_000,
-  });
+  const client = new GhostClient(ghostClientOptions());
 
   try {
     const schedulesResponse = await fetchJson(
@@ -209,10 +215,9 @@ async function checkNativeUpstream(url) {
 
 async function checkGhostfetchUpstream(url) {
   const startedAt = Date.now();
-  const client = new GhostClient({
-    browser: "Chrome_131",
-    timeout: UPSTREAM_DIAGNOSTIC_TIMEOUT_MS,
-  });
+  const client = new GhostClient(
+    ghostClientOptions(UPSTREAM_DIAGNOSTIC_TIMEOUT_MS),
+  );
 
   try {
     const response = await withTimeout(
