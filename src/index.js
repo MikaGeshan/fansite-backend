@@ -1,4 +1,4 @@
-import { Elysia } from "elysia";
+import http from "node:http";
 import { GhostClient } from "ghostfetch";
 
 const BASE_URL = "https://jkt48.com/api/v1";
@@ -15,39 +15,11 @@ process.on("uncaughtException", (error) => {
   console.error("[process] Uncaught exception:", error);
 });
 
-interface Member {
-  name: string;
-  type: string;
-  member_id: number;
-}
-
-interface ShowData {
-  code: string;
-  title: string;
-  date: string;
-  start_time: string;
-  end_time: string;
-  jkt48_member: Member[];
-  jkt48_member_type: string;
-  default_price: number;
-  total_quota: number;
-  reference_code?: string;
-}
-
-interface ScheduleResult {
-  source: string;
-  month: string;
-  year: string;
-  member_id: number;
-  count: number;
-  shows: ShowData[];
-}
-
-function isTargetMemberShow(show: Pick<ShowData, "jkt48_member">) {
+function isTargetMemberShow(show) {
   return show.jkt48_member.some((member) => member.member_id === MEMBER_ID);
 }
 
-async function fetchJson<T>(client: GhostClient, path: string): Promise<T> {
+async function fetchJson(client, path) {
   const url = `${BASE_URL}${path}`;
   const response = await client.fetch(url);
 
@@ -60,28 +32,25 @@ async function fetchJson<T>(client: GhostClient, path: string): Promise<T> {
       `JKT48 API error ${path}: ${response.status}; content-type=${contentType}; cf-mitigated=${cloudflareMitigation}`,
     );
   }
-  return response.json() as Promise<T>;
+
+  return response.json();
 }
 
-async function fetchJsonWithFreshClient<T>(path: string): Promise<T> {
+async function fetchJsonWithFreshClient(path) {
   const client = new GhostClient({
     browser: "Chrome_131",
     timeout: 15_000,
   });
 
   try {
-    return await fetchJson<T>(client, path);
+    return await fetchJson(client, path);
   } finally {
     await client.destroy().catch(() => {});
   }
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T) => Promise<R>,
-) {
-  const results = new Array<R>(items.length);
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
   let nextIndex = 0;
 
   async function worker() {
@@ -98,11 +67,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-// Core scraping logic
-async function fetchOfficialSchedule(
-  month: string,
-  year: string,
-): Promise<ScheduleResult> {
+async function fetchOfficialSchedule(month, year) {
   console.log(`[fetchOfficialSchedule] Starting ${month}/${year}`);
   const client = new GhostClient({
     browser: "Chrome_131",
@@ -110,7 +75,7 @@ async function fetchOfficialSchedule(
   });
 
   try {
-    const schedulesResponse = await fetchJson<{ data?: ShowData[] }>(
+    const schedulesResponse = await fetchJson(
       client,
       `/schedules?lang=id&month=${month}&year=${year}&type=show`,
     );
@@ -131,7 +96,7 @@ async function fetchOfficialSchedule(
         `[fetchOfficialSchedule] Found ${listMatches.length} matches in list payload`,
       );
       return {
-        source: "elysia-ghostfetch",
+        source: "node-ghostfetch",
         month,
         year,
         member_id: MEMBER_ID,
@@ -142,7 +107,7 @@ async function fetchOfficialSchedule(
 
     const codes = schedules
       .map((show) => show.reference_code)
-      .filter((code): code is string => typeof code === "string");
+      .filter((code) => typeof code === "string");
 
     console.log(
       `[fetchOfficialSchedule] Fetching ${codes.length} detail records with concurrency=${DETAIL_CONCURRENCY}`,
@@ -153,7 +118,7 @@ async function fetchOfficialSchedule(
       async (code) => {
         try {
           console.log(`[fetchOfficialSchedule] Fetching detail ${code}`);
-          const showDetail = await fetchJson<{ data?: ShowData }>(
+          const showDetail = await fetchJson(
             client,
             `/theater-shows/${code}?lang=id`,
           );
@@ -169,7 +134,7 @@ async function fetchOfficialSchedule(
       },
     );
 
-    const filteredShows = showsResponses.filter((show): show is ShowData => {
+    const filteredShows = showsResponses.filter((show) => {
       if (!show || !Array.isArray(show.jkt48_member)) return false;
       return isTargetMemberShow(show);
     });
@@ -178,7 +143,7 @@ async function fetchOfficialSchedule(
       `[fetchOfficialSchedule] Found ${filteredShows.length} matches in detail payloads`,
     );
     return {
-      source: "elysia-ghostfetch",
+      source: "node-ghostfetch",
       month,
       year,
       member_id: MEMBER_ID,
@@ -190,9 +155,9 @@ async function fetchOfficialSchedule(
   }
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
+async function withTimeout(promise, timeoutMs) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
     timeoutId = setTimeout(() => {
       reject(new Error(`Schedule request timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -205,7 +170,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
   }
 }
 
-async function checkNativeUpstream(url: string) {
+async function checkNativeUpstream(url) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeoutId = setTimeout(
@@ -242,7 +207,7 @@ async function checkNativeUpstream(url: string) {
   }
 }
 
-async function checkGhostfetchUpstream(url: string) {
+async function checkGhostfetchUpstream(url) {
   const startedAt = Date.now();
   const client = new GhostClient({
     browser: "Chrome_131",
@@ -273,38 +238,55 @@ async function checkGhostfetchUpstream(url: string) {
   }
 }
 
-// 2. Initialize Elysia App
-const port = Number(process.env.PORT ?? 3000);
+function sendJson(response, status, body, headers = {}) {
+  const payload = JSON.stringify(body);
 
-const app = new Elysia({
-  serve: {
-    hostname: "0.0.0.0",
-  },
-})
-  .get("/healthz", () => ({ ok: true }))
-  .get("/debug/upstream", async ({ query }) => {
+  response.writeHead(status, {
+    "content-type": "application/json;charset=utf-8",
+    "content-length": Buffer.byteLength(payload),
+    ...headers,
+  });
+  response.end(payload);
+}
+
+async function handleRequest(request, response) {
+  const url = new URL(request.url ?? "/", `http://${request.headers.host}`);
+
+  if (request.method !== "GET") {
+    sendJson(response, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  if (url.pathname === "/healthz") {
+    sendJson(response, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/debug/upstream") {
     const now = new Date();
-    const month = query.month ?? String(now.getMonth() + 1);
-    const year = query.year ?? String(now.getFullYear());
-    const url = `${BASE_URL}/schedules?lang=id&month=${month}&year=${year}&type=show`;
+    const month = url.searchParams.get("month") ?? String(now.getMonth() + 1);
+    const year = url.searchParams.get("year") ?? String(now.getFullYear());
+    const upstreamUrl = `${BASE_URL}/schedules?lang=id&month=${month}&year=${year}&type=show`;
 
     const [nativeFetch, ghostfetch] = await Promise.all([
-      checkNativeUpstream(url),
-      checkGhostfetchUpstream(url),
+      checkNativeUpstream(upstreamUrl),
+      checkGhostfetchUpstream(upstreamUrl),
     ]);
 
-    return {
-      url,
+    sendJson(response, 200, {
+      url: upstreamUrl,
       nativeFetch,
       ghostfetch,
-    };
-  })
-  .get("/debug/detail", async ({ query, set }) => {
-    const code = query.code;
+    });
+    return;
+  }
 
-    if (typeof code !== "string" || code.trim() === "") {
-      set.status = 400;
-      return { error: "Missing code query param" };
+  if (url.pathname === "/debug/detail") {
+    const code = url.searchParams.get("code");
+
+    if (!code || code.trim() === "") {
+      sendJson(response, 400, { error: "Missing code query param" });
+      return;
     }
 
     const path = `/theater-shows/${code}?lang=id`;
@@ -312,11 +294,11 @@ const app = new Elysia({
 
     try {
       const showDetail = await withTimeout(
-        fetchJsonWithFreshClient<{ data?: ShowData }>(path),
+        fetchJsonWithFreshClient(path),
         REQUEST_TIMEOUT_MS,
       );
 
-      return {
+      sendJson(response, 200, {
         ok: true,
         code,
         elapsedMs: Date.now() - startedAt,
@@ -326,55 +308,75 @@ const app = new Elysia({
           showDetail.data && Array.isArray(showDetail.data.jkt48_member)
             ? isTargetMemberShow(showDetail.data)
             : false,
-      };
+      });
     } catch (error) {
       console.error(`[debug/detail] ${code} failed:`, error);
-      set.status =
+      sendJson(
+        response,
         error instanceof Error && error.message.includes("timed out")
           ? 504
-          : 502;
-
-      return {
-        ok: false,
-        code,
-        elapsedMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      };
+          : 502,
+        {
+          ok: false,
+          code,
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      );
     }
-  })
-  // Public API Endpoint
-  .get("/api/schedule", async ({ query, set }) => {
-    try {
-      const now = new Date();
-      const month = query.month ?? String(now.getMonth() + 1);
-      const year = query.year ?? String(now.getFullYear());
+    return;
+  }
 
+  if (url.pathname === "/api/schedule") {
+    const now = new Date();
+    const month = url.searchParams.get("month") ?? String(now.getMonth() + 1);
+    const year = url.searchParams.get("year") ?? String(now.getFullYear());
+
+    try {
       console.log(`[api/schedule] Fetching schedule for ${month}/${year}`);
       const result = await withTimeout(
         fetchOfficialSchedule(month, year),
         REQUEST_TIMEOUT_MS,
       );
 
-      set.headers = {
-        "Cache-Control": "no-store",
-        "X-Schedule-Cache": "BYPASS",
-      };
-
       console.log(
         `[api/schedule] Returning ${result.count} shows for ${month}/${year}; cache=BYPASS`,
       );
-      return result.shows;
+      sendJson(response, 200, result.shows, {
+        "cache-control": "no-store",
+        "x-schedule-cache": "BYPASS",
+      });
     } catch (error) {
       console.error("[api/schedule] Failed to fetch schedules:", error);
-      set.status =
+      sendJson(
+        response,
         error instanceof Error && error.message.includes("timed out")
           ? 504
-          : 502;
-      return { error: "Failed to fetch schedules" };
+          : 502,
+        { error: "Failed to fetch schedules" },
+      );
     }
-  })
-  .listen(port);
+    return;
+  }
 
-console.log(
-  `🦊 Elysia is running at ${app.server?.hostname}:${app.server?.port}`,
-);
+  sendJson(response, 404, { error: "Not found" });
+}
+
+const port = Number(process.env.PORT ?? 3000);
+
+const server = http.createServer((request, response) => {
+  handleRequest(request, response).catch((error) => {
+    console.error("[server] Unhandled request error:", error);
+
+    if (!response.headersSent) {
+      sendJson(response, 500, { error: "Internal server error" });
+      return;
+    }
+
+    response.destroy(error instanceof Error ? error : undefined);
+  });
+});
+
+server.listen(port, "0.0.0.0", () => {
+  console.log(`Schedule API listening on 0.0.0.0:${port}`);
+});

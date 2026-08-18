@@ -3,12 +3,10 @@
   "version": "1.0.50",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "bun run --watch src/index.ts",
-    "start": "bun run src/index.ts"
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js"
   },
   "dependencies": {
-    "@elysia/cron": "^1.4.2",
-    "elysia": "latest",
     "ghostfetch": "^0.1.2"
   },
   "devDependencies": {
