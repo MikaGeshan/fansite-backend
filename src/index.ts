@@ -3,7 +3,7 @@ import { GhostClient } from "ghostfetch";
 
 const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
-const DETAIL_CONCURRENCY = 3;
+const DETAIL_CONCURRENCY = 1;
 const REQUEST_TIMEOUT_MS = 120_000;
 const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
 
@@ -153,9 +153,8 @@ async function fetchOfficialSchedule(
       async (code) => {
         try {
           console.log(`[fetchOfficialSchedule] Fetching detail ${code}`);
-          const showDetail = await fetchJsonWithFreshClient<{
-            data?: ShowData;
-          }>(
+          const showDetail = await fetchJson<{ data?: ShowData }>(
+            client,
             `/theater-shows/${code}?lang=id`,
           );
           console.log(`[fetchOfficialSchedule] Loaded detail ${code}`);
