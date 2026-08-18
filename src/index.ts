@@ -7,6 +7,14 @@ const DETAIL_CONCURRENCY = 1;
 const REQUEST_TIMEOUT_MS = 55_000;
 const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = 8_000;
 
+process.on("unhandledRejection", (error) => {
+  console.error("[process] Unhandled rejection:", error);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[process] Uncaught exception:", error);
+});
+
 interface Member {
   name: string;
   type: string;
@@ -53,6 +61,19 @@ async function fetchJson<T>(client: GhostClient, path: string): Promise<T> {
     );
   }
   return response.json() as Promise<T>;
+}
+
+async function fetchJsonWithFreshClient<T>(path: string): Promise<T> {
+  const client = new GhostClient({
+    browser: "Chrome_131",
+    timeout: 15_000,
+  });
+
+  try {
+    return await fetchJson<T>(client, path);
+  } finally {
+    await client.destroy().catch(() => {});
+  }
 }
 
 async function mapWithConcurrency<T, R>(
@@ -132,8 +153,9 @@ async function fetchOfficialSchedule(
       async (code) => {
         try {
           console.log(`[fetchOfficialSchedule] Fetching detail ${code}`);
-          const showDetail = await fetchJson<{ data?: ShowData }>(
-            client,
+          const showDetail = await fetchJsonWithFreshClient<{
+            data?: ShowData;
+          }>(
             `/theater-shows/${code}?lang=id`,
           );
           console.log(`[fetchOfficialSchedule] Loaded detail ${code}`);
@@ -277,6 +299,49 @@ const app = new Elysia({
       nativeFetch,
       ghostfetch,
     };
+  })
+  .get("/debug/detail", async ({ query, set }) => {
+    const code = query.code;
+
+    if (typeof code !== "string" || code.trim() === "") {
+      set.status = 400;
+      return { error: "Missing code query param" };
+    }
+
+    const path = `/theater-shows/${code}?lang=id`;
+    const startedAt = Date.now();
+
+    try {
+      const showDetail = await withTimeout(
+        fetchJsonWithFreshClient<{ data?: ShowData }>(path),
+        REQUEST_TIMEOUT_MS,
+      );
+
+      return {
+        ok: true,
+        code,
+        elapsedMs: Date.now() - startedAt,
+        hasData: Boolean(showDetail.data),
+        memberCount: showDetail.data?.jkt48_member?.length ?? 0,
+        hasTargetMember:
+          showDetail.data && Array.isArray(showDetail.data.jkt48_member)
+            ? isTargetMemberShow(showDetail.data)
+            : false,
+      };
+    } catch (error) {
+      console.error(`[debug/detail] ${code} failed:`, error);
+      set.status =
+        error instanceof Error && error.message.includes("timed out")
+          ? 504
+          : 502;
+
+      return {
+        ok: false,
+        code,
+        elapsedMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   })
   // Public API Endpoint
   .get("/api/schedule", async ({ query, set }) => {
