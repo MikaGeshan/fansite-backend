@@ -1,5 +1,8 @@
 import http from "node:http";
-import { chromium } from "playwright";
+import { chromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+
+chromium.use(StealthPlugin());
 
 const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
