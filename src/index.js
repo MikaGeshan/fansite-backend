@@ -27,7 +27,13 @@ async function getBrowser() {
     browserPromise = chromium.launch({
       headless: true,
       channel: process.env.PLAYWRIGHT_CHANNEL ?? "chromium",
-      args: ["--disable-dev-shm-usage"],
+      args: [
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-setuid-sandbox",
+        "--no-sandbox",
+        "--single-process",
+      ],
     });
   }
 
@@ -341,6 +347,34 @@ async function handleRequest(request, response) {
       nativeFetch,
       playwright,
     });
+    return;
+  }
+
+  if (url.pathname === "/debug/browser") {
+    const startedAt = Date.now();
+
+    try {
+      const { context, page } = await createPage();
+      await page.setContent("<html><body>ok</body></html>", {
+        timeout: PLAYWRIGHT_TIMEOUT_MS,
+      });
+      const text = await page.locator("body").innerText();
+      await context.close().catch(() => {});
+
+      sendJson(response, 200, {
+        ok: true,
+        text,
+        elapsedMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      console.error("[debug/browser] Browser check failed:", error);
+      await closeBrowser();
+      sendJson(response, 502, {
+        ok: false,
+        elapsedMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return;
   }
 
