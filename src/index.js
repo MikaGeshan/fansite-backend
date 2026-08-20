@@ -1,23 +1,18 @@
 import http from "node:http";
-import { GhostClient } from "ghostfetch";
+import { chromium } from "playwright";
 
 const BASE_URL = "https://jkt48.com/api/v1";
 const MEMBER_ID = 39;
 const DETAIL_CONCURRENCY = 1;
-const REQUEST_TIMEOUT_MS = 120_000;
-const GHOSTFETCH_TIMEOUT_MS = Number(process.env.GHOSTFETCH_TIMEOUT_MS ?? 60_000);
-const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = Number(
-  process.env.UPSTREAM_DIAGNOSTIC_TIMEOUT_MS ?? 60_000,
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS ?? 180_000);
+const PLAYWRIGHT_TIMEOUT_MS = Number(
+  process.env.PLAYWRIGHT_TIMEOUT_MS ?? 90_000,
 );
-const GHOSTFETCH_PROXY = process.env.GHOSTFETCH_PROXY;
+const UPSTREAM_DIAGNOSTIC_TIMEOUT_MS = Number(
+  process.env.UPSTREAM_DIAGNOSTIC_TIMEOUT_MS ?? 90_000,
+);
 
-function ghostClientOptions(timeout = GHOSTFETCH_TIMEOUT_MS) {
-  return {
-    browser: "Chrome_131",
-    timeout,
-    ...(GHOSTFETCH_PROXY ? { proxy: GHOSTFETCH_PROXY } : {}),
-  };
-}
+let browserPromise;
 
 process.on("unhandledRejection", (error) => {
   console.error("[process] Unhandled rejection:", error);
@@ -27,34 +22,102 @@ process.on("uncaughtException", (error) => {
   console.error("[process] Uncaught exception:", error);
 });
 
+async function getBrowser() {
+  if (!browserPromise) {
+    browserPromise = chromium.launch({
+      headless: true,
+      channel: process.env.PLAYWRIGHT_CHANNEL ?? "chromium",
+      args: ["--disable-dev-shm-usage"],
+    });
+  }
+
+  return browserPromise;
+}
+
+async function closeBrowser() {
+  if (!browserPromise) return;
+
+  const browser = await browserPromise.catch(() => null);
+  browserPromise = undefined;
+  await browser?.close().catch(() => {});
+}
+
+process.on("SIGTERM", () => {
+  closeBrowser().finally(() => process.exit(0));
+});
+
+process.on("SIGINT", () => {
+  closeBrowser().finally(() => process.exit(0));
+});
+
 function isTargetMemberShow(show) {
   return show.jkt48_member.some((member) => member.member_id === MEMBER_ID);
 }
 
-async function fetchJson(client, path) {
+async function createPage() {
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    locale: "id-ID",
+    timezoneId: "Asia/Jakarta",
+    userAgent:
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    extraHTTPHeaders: {
+      accept: "application/json,text/plain,*/*",
+      "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
+  });
+  const page = await context.newPage();
+  page.setDefaultTimeout(PLAYWRIGHT_TIMEOUT_MS);
+  page.setDefaultNavigationTimeout(PLAYWRIGHT_TIMEOUT_MS);
+  return { context, page };
+}
+
+async function readPageText(page) {
+  await page.waitForFunction(
+    () => {
+      const text = document.body?.innerText?.trim() ?? "";
+      return text.startsWith("{") || text.startsWith("[");
+    },
+    null,
+    { timeout: PLAYWRIGHT_TIMEOUT_MS },
+  );
+
+  return page.locator("body").innerText({ timeout: PLAYWRIGHT_TIMEOUT_MS });
+}
+
+async function fetchJsonWithPage(page, path) {
   const url = `${BASE_URL}${path}`;
-  const response = await client.fetch(url);
+  const response = await page.goto(url, {
+    waitUntil: "domcontentloaded",
+    timeout: PLAYWRIGHT_TIMEOUT_MS,
+  });
 
-  if (response.status !== 200) {
-    const contentType = response.headers.get("content-type") ?? "unknown";
-    const cloudflareMitigation =
-      response.headers.get("cf-mitigated") ?? "none";
+  const status = response?.status() ?? 0;
+  const headers = response?.headers() ?? {};
+  const text = await readPageText(page);
 
+  if (status !== 200) {
     throw new Error(
-      `JKT48 API error ${path}: ${response.status}; content-type=${contentType}; cf-mitigated=${cloudflareMitigation}`,
+      `JKT48 API error ${path}: ${status}; content-type=${headers["content-type"] ?? "unknown"}; cf-mitigated=${headers["cf-mitigated"] ?? "none"}; body=${text.slice(0, 120)}`,
     );
   }
 
-  return response.json();
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(
+      `JKT48 API returned non-JSON for ${path}: ${error instanceof Error ? error.message : String(error)}; body=${text.slice(0, 120)}`,
+    );
+  }
 }
 
-async function fetchJsonWithFreshClient(path) {
-  const client = new GhostClient(ghostClientOptions());
+async function fetchJsonWithFreshPage(path) {
+  const { context, page } = await createPage();
 
   try {
-    return await fetchJson(client, path);
+    return await fetchJsonWithPage(page, path);
   } finally {
-    await client.destroy().catch(() => {});
+    await context.close().catch(() => {});
   }
 }
 
@@ -78,11 +141,11 @@ async function mapWithConcurrency(items, limit, mapper) {
 
 async function fetchOfficialSchedule(month, year) {
   console.log(`[fetchOfficialSchedule] Starting ${month}/${year}`);
-  const client = new GhostClient(ghostClientOptions());
+  const { context, page } = await createPage();
 
   try {
-    const schedulesResponse = await fetchJson(
-      client,
+    const schedulesResponse = await fetchJsonWithPage(
+      page,
       `/schedules?lang=id&month=${month}&year=${year}&type=show`,
     );
 
@@ -102,7 +165,7 @@ async function fetchOfficialSchedule(month, year) {
         `[fetchOfficialSchedule] Found ${listMatches.length} matches in list payload`,
       );
       return {
-        source: "node-ghostfetch",
+        source: "node-playwright",
         month,
         year,
         member_id: MEMBER_ID,
@@ -124,8 +187,8 @@ async function fetchOfficialSchedule(month, year) {
       async (code) => {
         try {
           console.log(`[fetchOfficialSchedule] Fetching detail ${code}`);
-          const showDetail = await fetchJson(
-            client,
+          const showDetail = await fetchJsonWithPage(
+            page,
             `/theater-shows/${code}?lang=id`,
           );
           console.log(`[fetchOfficialSchedule] Loaded detail ${code}`);
@@ -149,7 +212,7 @@ async function fetchOfficialSchedule(month, year) {
       `[fetchOfficialSchedule] Found ${filteredShows.length} matches in detail payloads`,
     );
     return {
-      source: "node-ghostfetch",
+      source: "node-playwright",
       month,
       year,
       member_id: MEMBER_ID,
@@ -157,7 +220,7 @@ async function fetchOfficialSchedule(month, year) {
       shows: filteredShows,
     };
   } finally {
-    await client.destroy().catch(() => {});
+    await context.close().catch(() => {});
   }
 }
 
@@ -213,24 +276,20 @@ async function checkNativeUpstream(url) {
   }
 }
 
-async function checkGhostfetchUpstream(url) {
+async function checkPlaywrightUpstream(path) {
   const startedAt = Date.now();
-  const client = new GhostClient(
-    ghostClientOptions(UPSTREAM_DIAGNOSTIC_TIMEOUT_MS),
-  );
 
   try {
-    const response = await withTimeout(
-      client.fetch(url, { timeout: UPSTREAM_DIAGNOSTIC_TIMEOUT_MS }),
-      UPSTREAM_DIAGNOSTIC_TIMEOUT_MS + 2_000,
+    const data = await withTimeout(
+      fetchJsonWithFreshPage(path),
+      UPSTREAM_DIAGNOSTIC_TIMEOUT_MS,
     );
 
     return {
       ok: true,
-      status: response.status,
-      contentType: response.headers.get("content-type"),
-      cloudflareMitigation: response.headers.get("cf-mitigated"),
       elapsedMs: Date.now() - startedAt,
+      hasData: Boolean(data.data),
+      count: Array.isArray(data.data) ? data.data.length : undefined,
     };
   } catch (error) {
     return {
@@ -238,8 +297,6 @@ async function checkGhostfetchUpstream(url) {
       error: error instanceof Error ? error.message : String(error),
       elapsedMs: Date.now() - startedAt,
     };
-  } finally {
-    await client.destroy().catch(() => {});
   }
 }
 
@@ -271,17 +328,18 @@ async function handleRequest(request, response) {
     const now = new Date();
     const month = url.searchParams.get("month") ?? String(now.getMonth() + 1);
     const year = url.searchParams.get("year") ?? String(now.getFullYear());
-    const upstreamUrl = `${BASE_URL}/schedules?lang=id&month=${month}&year=${year}&type=show`;
+    const path = `/schedules?lang=id&month=${month}&year=${year}&type=show`;
+    const upstreamUrl = `${BASE_URL}${path}`;
 
-    const [nativeFetch, ghostfetch] = await Promise.all([
+    const [nativeFetch, playwright] = await Promise.all([
       checkNativeUpstream(upstreamUrl),
-      checkGhostfetchUpstream(upstreamUrl),
+      checkPlaywrightUpstream(path),
     ]);
 
     sendJson(response, 200, {
       url: upstreamUrl,
       nativeFetch,
-      ghostfetch,
+      playwright,
     });
     return;
   }
@@ -299,7 +357,7 @@ async function handleRequest(request, response) {
 
     try {
       const showDetail = await withTimeout(
-        fetchJsonWithFreshClient(path),
+        fetchJsonWithFreshPage(path),
         REQUEST_TIMEOUT_MS,
       );
 
