@@ -24,15 +24,17 @@ process.on("uncaughtException", (error) => {
 
 async function getBrowser() {
   if (!browserPromise) {
-    browserPromise = chromium.launch({
-      headless: true,
-      channel: process.env.PLAYWRIGHT_CHANNEL ?? "chromium",
-      args: [
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        "--no-sandbox",
-      ],
-    });
+    console.log("[playwright] Launching Chromium");
+    browserPromise = chromium
+      .launch({
+        headless: true,
+        channel: process.env.PLAYWRIGHT_CHANNEL ?? "chromium",
+        args: ["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"],
+      })
+      .catch((error) => {
+        browserPromise = undefined;
+        throw error;
+      });
   }
 
   return browserPromise;
@@ -460,6 +462,7 @@ async function handleRequest(request, response) {
 const port = Number(process.env.PORT ?? 3000);
 
 const server = http.createServer((request, response) => {
+  console.log(`[server] ${request.method} ${request.url}`);
   handleRequest(request, response).catch((error) => {
     console.error("[server] Unhandled request error:", error);
 
@@ -470,6 +473,10 @@ const server = http.createServer((request, response) => {
 
     response.destroy(error instanceof Error ? error : undefined);
   });
+});
+
+server.on("error", (error) => {
+  console.error("[server] Listen/server error:", error);
 });
 
 server.listen(port, "0.0.0.0", () => {
