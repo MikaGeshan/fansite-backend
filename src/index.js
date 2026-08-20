@@ -78,19 +78,6 @@ async function createPage() {
   return { context, page };
 }
 
-async function readPageText(page) {
-  await page.waitForFunction(
-    () => {
-      const text = document.body?.innerText?.trim() ?? "";
-      return text.startsWith("{") || text.startsWith("[");
-    },
-    null,
-    { timeout: PLAYWRIGHT_TIMEOUT_MS },
-  );
-
-  return page.locator("body").innerText({ timeout: PLAYWRIGHT_TIMEOUT_MS });
-}
-
 async function fetchJsonWithPage(page, path) {
   const url = `${BASE_URL}${path}`;
   const response = await page.goto(url, {
@@ -100,11 +87,20 @@ async function fetchJsonWithPage(page, path) {
 
   const status = response?.status() ?? 0;
   const headers = response?.headers() ?? {};
-  const text = await readPageText(page);
+  await page.waitForLoadState("networkidle", { timeout: 10_000 }).catch(() => {});
+  const text = (await page.locator("body").innerText({ timeout: 5_000 }))
+    .trim();
+  const title = await page.title().catch(() => "");
 
   if (status !== 200) {
     throw new Error(
-      `JKT48 API error ${path}: ${status}; content-type=${headers["content-type"] ?? "unknown"}; cf-mitigated=${headers["cf-mitigated"] ?? "none"}; body=${text.slice(0, 120)}`,
+      `JKT48 API error ${path}: ${status}; title=${title}; content-type=${headers["content-type"] ?? "unknown"}; cf-mitigated=${headers["cf-mitigated"] ?? "none"}; body=${text.slice(0, 180)}`,
+    );
+  }
+
+  if (!text.startsWith("{") && !text.startsWith("[")) {
+    throw new Error(
+      `JKT48 API returned non-JSON for ${path}: status=${status}; title=${title}; content-type=${headers["content-type"] ?? "unknown"}; body=${text.slice(0, 240)}`,
     );
   }
 
