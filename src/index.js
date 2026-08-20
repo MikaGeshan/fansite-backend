@@ -30,9 +30,7 @@ async function getBrowser() {
       args: [
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--disable-setuid-sandbox",
         "--no-sandbox",
-        "--single-process",
       ],
     });
   }
